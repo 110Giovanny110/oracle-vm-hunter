@@ -1,8 +1,10 @@
 name: Caçar VM Oracle
 
+# Cada execução fica ~5h30 tentando a cada 5 min e, ao terminar sem vaga,
+# dispara a próxima execução sozinha. O cron é só reserva caso a corrente quebre.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -16,7 +18,7 @@ permissions:
 jobs:
   tentar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -40,17 +42,35 @@ jobs:
           EOF
           chmod 600 ~/.oci/config
 
-      - name: Tentar criar a VM
+      - name: Tentar criar a VM (a cada 5 min, por ~5h30)
+        id: tentar
         env:
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
           OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
-        run: bash criar-vm.sh
+        run: |
+          FIM=$(( $(date +%s) + 330*60 ))
+          while [ "$(date +%s)" -lt "$FIM" ]; do
+            echo "=== Tentativa $(date -u +%H:%M) UTC ==="
+            if bash criar-vm.sh; then
+              echo "conseguiu=sim" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 300
+          done
+          echo "conseguiu=nao" >> "$GITHUB_OUTPUT"
 
       # Conseguiu (ou já existe): desliga este workflow para parar de tentar.
       - name: Parar as tentativas
-        if: success()
+        if: steps.tentar.outputs.conseguiu == 'sim'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow disable "Caçar VM Oracle" --repo "${{ github.repository }}"
+
+      # Ainda sem vaga: emenda a próxima execução.
+      - name: Disparar próxima rodada
+        if: steps.tentar.outputs.conseguiu == 'nao'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cacar-vm.yml --repo "${{ github.repository }}"
